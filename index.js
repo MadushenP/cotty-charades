@@ -83,8 +83,18 @@ io.on("connection", (socket) => {
 
     socket.join(roomCode);
     
-    const player = { id: socket.id, name: playerName, team: teamName };
-    room.players.push(player);
+    // FIX: Check if player exists first to avoid duplicates (Pending vs Team A)
+    const existingPlayerIndex = room.players.findIndex(p => p.id === socket.id);
+    
+    if (existingPlayerIndex !== -1) {
+        // Update existing player info
+        room.players[existingPlayerIndex].name = playerName;
+        room.players[existingPlayerIndex].team = teamName;
+    } else {
+        // Add new player
+        const player = { id: socket.id, name: playerName, team: teamName };
+        room.players.push(player);
+    }
 
     // Notify everyone in room (update lobby)
     io.to(roomCode).emit("update_lobby", {
@@ -185,9 +195,13 @@ io.on("connection", (socket) => {
     const score = Math.round(maxPoints * (0.5 + (0.5 * (timeRemaining / totalTime))));
 
     // Find player's team and update score
+    // FIX: Ensure we are matching the correct team key
     const player = room.players.find(p => p.id === socket.id);
-    if (player) {
+    if (player && room.scores[player.team] !== undefined) {
       room.scores[player.team] += score;
+      console.log(`Score update: Team ${player.team} +${score} = ${room.scores[player.team]}`);
+    } else {
+        console.log("Score Error: Player or Team not found", player);
     }
 
     io.to(roomCode).emit("turn_ended", { 
