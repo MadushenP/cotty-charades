@@ -146,6 +146,7 @@ io.on("connection", (socket) => {
       config: data, // { roomName, gameType, teamCount, teamNames, duration }
       players: [],
       scores: {}, // { "Team A": 0, "Team B": 0 }
+      usedWords: [], // <--- TRACK USED WORDS HERE
       currentTurn: null, // { player, team, word, startTime, difficulty }
       timer: null
     };
@@ -168,27 +169,23 @@ io.on("connection", (socket) => {
 
     socket.join(roomCode);
     
-    // FIX: Check if player exists first to avoid duplicates (Pending vs Team A)
+    // Check if player exists first to avoid duplicates
     const existingPlayerIndex = room.players.findIndex(p => p.id === socket.id);
     
     if (existingPlayerIndex !== -1) {
-        // Update existing player info
         room.players[existingPlayerIndex].name = playerName;
         room.players[existingPlayerIndex].team = teamName;
     } else {
-        // Add new player
         const player = { id: socket.id, name: playerName, team: teamName };
         room.players.push(player);
     }
 
-    // Notify everyone in room (update lobby)
     io.to(roomCode).emit("update_lobby", {
       players: room.players,
       config: room.config,
       scores: room.scores
     });
 
-    // Send current game state if game is in progress
     if (room.currentTurn && room.currentTurn.active) {
        socket.emit("game_in_progress", room.currentTurn);
     }
@@ -196,27 +193,30 @@ io.on("connection", (socket) => {
 
   // 3. Player requests to take a turn
   socket.on("setup_turn", ({ roomCode }) => {
-    // Only send the setup screen to the requestor
     socket.emit("show_turn_options");
   });
 
-  // 4. Player confirms options (Movie/Hard) -> Get Word
+  // 4. Player confirms options -> Get Word
   socket.on("get_word", ({ roomCode, type, difficulty }) => {
     const room = rooms[roomCode];
     if(!room) return;
 
-    // Filter words
+    // Filter words: Match criteria AND ensure NOT in usedWords
     const eligibleWords = wordDatabase.filter(w => 
       (type === "Both" || w.type === type) && 
-      w.difficulty === difficulty
+      w.difficulty === difficulty &&
+      !room.usedWords.includes(w.word) // <--- FILTER DUPLICATES
     );
 
     if (eligibleWords.length === 0) {
-      socket.emit("error_msg", "No words found for these settings! Add more in Admin.");
+      socket.emit("error_msg", "All words in this category have been played! Add more in Admin.");
       return;
     }
 
     const randomWord = eligibleWords[Math.floor(Math.random() * eligibleWords.length)];
+
+    // Mark word as used immediately
+    room.usedWords.push(randomWord.word); // <--- MARK AS USED
 
     // Set Turn State
     room.currentTurn = {
@@ -227,10 +227,7 @@ io.on("connection", (socket) => {
       active: false
     };
 
-    // Tell everyone else "Gamer Ready"
     socket.broadcast.to(roomCode).emit("gamer_getting_ready");
-    
-    // Show the word ONLY to the actor
     socket.emit("receive_word", randomWord);
   });
 
@@ -245,16 +242,14 @@ io.on("connection", (socket) => {
 
     io.to(roomCode).emit("game_started", { duration });
 
-    // Clear existing timer if any
     if (room.timer) clearInterval(room.timer);
 
-    // Server-side timer to sync end
     room.timer = setInterval(() => {
       duration--;
       if (duration <= 0) {
         clearInterval(room.timer);
         io.to(roomCode).emit("turn_ended", { success: false });
-        io.to(roomCode).emit("update_scores", room.scores); // Show leaderboard
+        io.to(roomCode).emit("update_scores", room.scores); 
       }
     }, 1000);
   });
@@ -266,27 +261,19 @@ io.on("connection", (socket) => {
 
     clearInterval(room.timer);
 
-    // --- SCORING ALGORITHM ---
     const totalTime = parseInt(room.config.duration);
     const timeTaken = (Date.now() - room.currentTurn.startTime) / 1000;
     const timeRemaining = Math.max(0, totalTime - timeTaken);
     
-    // Difficulty Base: Easy (60), Medium (80), Hard (100)
     let maxPoints = 60;
     if (room.currentTurn.difficulty === "Medium") maxPoints = 80;
     if (room.currentTurn.difficulty === "Hard") maxPoints = 100;
 
-    // Time Bonus: You get full points if instant, half points if last second
     const score = Math.round(maxPoints * (0.5 + (0.5 * (timeRemaining / totalTime))));
 
-    // Find player's team and update score
-    // FIX: Ensure we are matching the correct team key
     const player = room.players.find(p => p.id === socket.id);
     if (player && room.scores[player.team] !== undefined) {
       room.scores[player.team] += score;
-      console.log(`Score update: Team ${player.team} +${score} = ${room.scores[player.team]}`);
-    } else {
-        console.log("Score Error: Player or Team not found", player);
     }
 
     io.to(roomCode).emit("turn_ended", { 
